@@ -1,0 +1,322 @@
+---
+title: "Titanic"
+author: "Diego A. Hernandez"
+date: "January 28, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## TITANIC
+
+Load train and test sets:
+```{r}
+setwd("/home/diego/Documents/Kaggle")
+train_titanic = read.csv("train.csv")
+test_titanic = read.csv("test.csv")
+```
+
+Loading libraries:
+```{r}
+library(MASS)
+library(tidyverse)
+library(corrplot)
+library(forecast)
+library(glmnet)
+library(FSelector)
+library(randomForest)
+```
+
+Let's have a quick look of the dataset:
+```{r}
+glimpse(train_titanic)
+```
+We clearly see that Survived and Pclass have to be converted into factors:
+
+```{r}
+train_titanic$Survived = as.factor(train_titanic$Survived)
+train_titanic$Pclass = as.factor(train_titanic$Pclass)
+
+test_titanic$Pclass = as.factor(test_titanic$Pclass)
+
+glimpse(train_titanic)
+```
+
+Remove duplicates:
+
+```{r}
+length(unique(train_titanic$PassengerId)) == nrow(train_titanic)
+```
+
+```{r}
+#train_titanic = train_titanic[ , -which(names(train_titanic) %in% c("PassengerId"))]
+#test_titanic = test_titanic[ , -which(names(test_titanic) %in% c("PassengerId"))]
+```
+
+
+Counting the number of NAs:
+```{r}
+na.cols = which(colSums(is.na(train_titanic)) > 0)
+sort(colSums(sapply(train_titanic[na.cols], is.na)), decreasing = TRUE)
+paste('There are', length(na.cols), 'columns with missing values')
+```
+We see that Age has 177 missing values.
+
+```{r}
+train_titanic %>%
+  select(Cabin) %>%
+  filter(Cabin !='')
+
+train_titanic = train_titanic[ , -which(names(train_titanic) %in% c("Cabin"))]
+test_titanic = test_titanic[ , -which(names(test_titanic) %in% c("Cabin"))]
+```
+Cabin column has only 204/891 non missing values, we wont play with it. We may delete it.
+
+As we have 177 missing values for Age we are going to build a linear model to predict it:
+```{r}
+# We divide the train dataset into two: NAs and non-NAs
+age_train = train_titanic[!is.na(train_titanic$Age), ]
+age_test = train_titanic[is.na(train_titanic$Age), ]
+
+# We use all the variables except Cabin
+m_age1 = lm(Age ~ Survived + Pclass + Sex + SibSp + Parch + Fare + Embarked, data = train_titanic) 
+summary(m_age1)
+```
+We see that some of the features are not significants, we will start a backward elimination process to make a good model, lets start by eliminating Sex:
+```{r}
+m_age2 = lm(Age ~ Survived + Pclass + SibSp + Parch + Fare + Embarked, data = train_titanic)
+summary(m_age2)
+```
+Still non significant, now we will eliminate Embarked:
+```{r}
+m_age3 = lm(Age ~ Survived + Pclass + SibSp + Parch + Fare, data = train_titanic)
+summary(m_age3)
+```
+Fare is in the limit, more than 5% but still significant at a 10% level of significance, however Parch has a p-value of 24% we will eliminate it:
+```{r}
+m_age4 = lm(Age ~ Survived + Pclass + SibSp + Fare, data = train_titanic)
+summary(m_age4)
+```
+Right now our model is 100% significant, even Fare.
+We will proceed to predict the values and introduce them in the training dataset:
+```{r}
+age_test$Age = predict(m_age4, newdata = age_test)
+
+train_titanic = age_train %>%
+  bind_rows(age_test)
+
+sum(is.na(train_titanic$Age))
+```
+We have 0 missing values for Age.
+
+
+After filling the Age column(which is quite relevant), we can start a descriptive analysis of the variables(stats and plots):
+
+```{r}
+train_titanic %>%
+  group_by(Sex) %>%
+  count(Sex)
+```
+There are 314 females and 577 males, we clearly see a dominant level of males over females in terms of numbers
+
+Lets analyze the Pclass variable and see the dsitribution among richs, middle-class and poors:
+```{r}
+train_titanic %>%
+  group_by(Pclass) %>%
+  count(Pclass)
+```
+As we can see there are more poors passengers than rich, if we want to see it on percentages we can talk about:
+
+Rich = 24.24%
+Middle-class = 20.65%
+Poor = 55.1%
+```{r}
+ggplot(data = train_titanic) + geom_bar(aes(x = Pclass, fill = Pclass))
+```
+
+Different ports of embarkation:
+```{r}
+train_titanic %>%
+  group_by(Embarked) %>%
+  count(Embarked)
+```
+168 from Cherbourg
+77 from Queenstown
+644 Southampton
+```{r}
+ggplot(data = train_titanic) + geom_bar(aes(x = Embarked, fill = Embarked))
+```
+
+Survivors:
+```{r}
+train_titanic %>%
+  group_by(Survived) %>%
+  count(Survived)
+```
+More deads than survivors:
+
+Deads = 61,61%
+Survivors = 38,39%
+
+
+Distribution of the ages:
+```{r}
+ggplot(data = train_titanic, aes(x = Age)) + 
+  geom_histogram(aes(colour = I("white"))) + 
+  theme_minimal()
+```
+Range between 20 and 40 is the main characteristic for the Age
+
+**|FEATURE ENGINEERING|**
+
+Let's create a new categorical variable for the Age:
+
+Children = 0-12
+Young = 13-28
+Middle-age = 29-50
+Old > 50
+
+Those values were choosen because back in the 10s life expectancy was quite smaller than nowadays:
+```{r}
+train_titanic = train_titanic %>%
+  mutate(Age_intervals = ifelse(Age >= 0 & Age <= 12, 'Children',
+                                ifelse(Age > 12 & Age <= 28, 'Young',
+                                       ifelse(Age > 28 & Age <= 50, 'Middle', 'Old'))))
+```
+
+After creating this new variable let's analyze it and see how is the distribution:
+```{r}
+train_titanic %>%
+  group_by(Age_intervals) %>%
+  count(Age_intervals)
+```
+Children and Middle-age are majority, this may be linked to the number of families that were on the boat.
+```{r}
+ggplot(data = train_titanic) + geom_bar(aes(x = Age_intervals, fill = Age_intervals))
+```
+
+We are going to create a variable called 'Family' to see if the chances of survival were higher if someone belonged to a family, SibSp == 1 & Parch == 1:
+```{r}
+train_titanic = train_titanic %>%
+  mutate(Family = ifelse(SibSp == 1 & Parch == 1, 1, 0))
+
+test_titanic = test_titanic %>%
+  mutate(Family = ifelse(SibSp == 1 & Parch == 1, 1, 0))
+
+glimpse(train_titanic)
+#Family and Age_intervals are not factorized let's correct this
+train_titanic$Family = as.factor(train_titanic$Family)
+train_titanic$Age_intervals = as.factor(train_titanic$Age_intervals)
+
+test_titanic$Family = as.factor(test_titanic$Family)
+```
+834 Families
+
+**|MODEL|**
+
+We will use the Information Gain information to check if a variable is relevant to our model or not:
+```{r}
+chi2_titanic = data.frame(chi.squared(formula=Survived ~., data = train_titanic))
+chi2_titanic$features = rownames(chi2_titanic)
+chi2_titanic[order(chi2_titanic$attr_importance, decreasing = T), ]
+```
+Name and Ticket are the most important ones but it has no sense cause Ticket it just a code and Name does not influence, let's remove them and re compute the chi2 values:
+
+```{r}
+#train_titanic = train_titanic[ , -which(names(train_titanic) %in% c("Name"))]
+#train_titanic = train_titanic[ , -which(names(train_titanic) %in% c("Ticket"))]
+
+#test_titanic = train_titanic[ , -which(names(train_titanic) %in% c("Name"))]
+#test_titanic = train_titanic[ , -which(names(train_titanic) %in% c("Ticket"))]
+```
+
+
+```{r}
+chi2_titanic = data.frame(chi.squared(formula=Survived ~., data = train_titanic))
+chi2_titanic$features = rownames(chi2_titanic)
+chi2_titanic[order(chi2_titanic$attr_importance, decreasing = T), ]
+```
+
+Our variables will be: Sex + Fare + Pclass + Embarked + Age_intervals + Family
+
+```{r}
+sampleDF = floor(0.70 * nrow(train_titanic))
+set.seed(361)
+train_set = sample(seq_len(nrow(train_titanic)), size = sampleDF)
+
+trainTITA = train_titanic[train_set, ]
+testTITA = train_titanic[-train_set, ]
+```
+
+```{r}
+RandomF1 = randomForest(Survived ~ Sex + Fare + Embarked + Age_intervals + Family,
+             data = trainTITA)
+
+testing = predict(RandomF1, newdata = testTITA)
+#summary(RandomF1)
+summary(testing)
+```
+
+```{r}
+age_train1 = test_titanic[!is.na(test_titanic$Age), ]
+age_test1 = test_titanic[is.na(test_titanic$Age), ]
+
+m_age4_test = lm(Age ~ Pclass + SibSp + Fare, data = test_titanic)
+
+age_test1$Age = predict(m_age4_test, newdata = age_test1)
+
+test_titanic = age_train1 %>%
+  bind_rows(age_test1)
+
+sum(is.na(test_titanic$Age))
+
+test_titanic = test_titanic %>%
+  mutate(Age_intervals = ifelse(Age >= 0 & Age <= 12, 'Children',
+                                ifelse(Age > 12 & Age <= 28, 'Young',
+                                       ifelse(Age > 28 & Age <= 50, 'Middle', 'Old'))))
+
+test_titanic$Age_intervals = as.factor(test_titanic$Age_intervals)
+```
+
+**|FINAL PREDICTION|**
+To avoid any problem between training set and test set:
+```{r}
+levels(test_titanic$Pclass) = levels(train_titanic$Pclass)
+levels(test_titanic$Sex) = levels(train_titanic$Sex)
+levels(test_titanic$Age_intervals) = levels(train_titanic$Age_intervals)
+levels(test_titanic$Embarked) = levels(train_titanic$Embarked)
+levels(test_titanic$Family) = levels(train_titanic$Family)
+```
+
+
+Prediction:
+```{r}
+test_titanic_pred = test_titanic %>%
+  mutate(Survived = predict(RandomF1, newdata = test_titanic))
+```
+
+Export it as .csv:
+```{r}
+test_titanic_pred_submission = test_titanic_pred %>%
+  select(PassengerId, Survived)
+
+write.csv(test_titanic_pred_submission, "titanic_kaggle.csv")
+```
+
+
+```{r}
+test_titanic_pred %>%
+  group_by(Survived) %>%
+  count(Survived)
+```
+
+
+
+
+
+
+
+
+
